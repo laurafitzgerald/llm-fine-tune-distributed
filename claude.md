@@ -7,10 +7,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 I am learning Red Hat OpenShift AI for distributed model training with Kubeflow. This project implements **wilderness survival and practical skills Q&A fine-tuning** using **distributed training across multiple GPUs** as a demonstration of scalable AI capabilities. The goal is to transform a generic language model into a wilderness survival expert using distributed computing for faster, more efficient training.
 
 **Project Evolution Context:**
-This project evolved from a single-node training setup to a distributed training architecture. We successfully implemented PyTorchJob distributed training with OpenShift AI monitoring using Kubeflow. The current phase focuses on advanced LLM fine-tuning using TRL framework with distributed data parallel (DDP) across multiple NVIDIA L40S GPUs.
+This project evolved from a single-node training setup to a distributed training architecture. We successfully implemented PyTorchJob distributed training with OpenShift AI monitoring using Kubeflow. We then added a **Ray/KubeRay implementation** using Ray Train with CodeFlare SDK, which provides significant advantages in development workflow, monitoring, and fault tolerance.
 
-**Current Phase: Distributed TRL-Based Fine-Tuning**
-We have implemented distributed TRL (Transformers Reinforcement Learning) framework for advanced chat model fine-tuning across multiple GPUs. This approach provides better training methodology for conversational AI with proper chat template handling and significantly faster training through parallelization.
+**Current Phase: Dual Implementation Approach**
+The project now supports TWO distributed training approaches:
+
+1. **PyTorchJob** Using Kubeflow Training Operator with manual PyTorch DDP setup
+2. **Ray/KubeRay**  Using Ray Train with CodeFlare SDK for simplified deployment
+
+Both implement distributed TRL (Transformers Reinforcement Learning) framework for advanced chat model fine-tuning across multiple NVIDIA L40S GPUs. Ray is recommended for development due to faster iteration (no Docker builds needed with MODH images).
 
 **Target Demo Scenario:**
 - **Before Fine-tuning**: Generic model provides basic responses to survival questions
@@ -25,17 +30,36 @@ We have implemented distributed TRL (Transformers Reinforcement Learning) framew
 
 ## Distributed Training Architecture
 
+### PyTorchJob Implementation
+
 **PyTorch Distributed Setup:**
 - **Master Node**: 1 replica - coordinates training and handles model saving
 - **Worker Nodes**: 3 replicas - participate in distributed training
 - **Communication Backend**: NCCL for GPU-to-GPU communication
 - **Total World Size**: 4 (1 Master + 3 Workers)
+- **Deployment**: YAML-based with kubectl
+- **Files**: `training.py`, `deploy/pytorchjob.yaml`, `deploy/deploy-script.sh`
 
-**Distributed Training Benefits:**
+### Ray/KubeRay Implementation ⚡ NEW
+
+**Ray Train Distributed Setup:**
+- **Head Node**: 1 node - Ray cluster coordinator + training participant
+- **Worker Nodes**: 3 nodes - Ray workers for distributed training
+- **Communication**: Ray Train with automatic distributed setup (handles NCCL internally)
+- **Deployment**: Programmatic with CodeFlare SDK (Python) via ray-distributed-training.ipynb
+- **Files**: `ray_training.py`
+
+**Ray Advantages:**
+- **No Docker Builds for Dev**: CodeFlare MODH image (`quay.io/modh/ray:2.23.0-py39-cu121`) includes Ray + PyTorch + CUDA
+- **Runtime Environment**: Upload code and install packages dynamically via `runtime_env`
+- **Ray Dashboard**: Rich monitoring UI with metrics, task timelines, resource utilization
+- **Automatic Distributed Setup**: No manual NCCL/DDP configuration needed
+
+**Distributed Training Benefits (Both Implementations):**
 - **4x Faster Training**: Parallel processing across 4 GPUs
 - **Linear Scaling**: Each GPU processes different data batches simultaneously
 - **Memory Efficiency**: Model parameters shared, gradients synchronized
-- **Fault Tolerance**: Training continues if individual workers fail (with restart policy)
+- **Fault Tolerance**: Training continues if individual workers fail
 
 ## NVIDIA L40S GPU Specifications (Per Node)
 
@@ -72,11 +96,12 @@ The project uses NVIDIA L40S GPUs optimized for AI/ML workloads in distributed c
 
 **Key Technical Decisions:**
 - **Distributed TRL Framework**: Using SFTTrainer with SFTConfig optimized for distributed chat model fine-tuning
-- **PyTorch DDP**: Distributed Data Parallel for efficient gradient synchronization
+- **Distributed Options**: PyTorch DDP (manual) OR Ray Train (automatic)
+- **CodeFlare MODH Images**: Pre-built Ray images for fast development (Ray implementation)
 - **SmolLM3-3B**: Larger, more capable model architecture suitable for distributed training
 - **No RAG (Retrieval-Augmented Generation)**: Pure fine-tuning approach for reliable demo
 - **BF16 Training**: Optimal precision for L40S Ada Lovelace architecture across all nodes
-- **NCCL Backend**: High-performance GPU communication for gradient synchronization
+- **NCCL Backend**: High-performance GPU communication (automatically configured by Ray Train)
 - **Synchronized Batch Processing**: Coordinated training across all GPUs
 
 **Red Hat OpenShift AI Distributed Cluster Details:**
@@ -106,12 +131,13 @@ The project uses NVIDIA L40S GPUs optimized for AI/ML workloads in distributed c
 - **workspace-pvc**: Shared working directory and temporary files (mounted on all nodes)
 - **Data**: Embedded in container (no separate PVC needed)
 
-### Environment Variables (Distributed Training)
-The distributed training script accepts configuration through environment variables:
+### Environment Variables
+
+**PyTorchJob Training (`training.py`):**
 - `EPOCHS`: Number of training epochs (default: 4)
-- `BATCH_SIZE`: Training batch size per GPU (default: 8, reduced for distributed)
-- `LEARNING_RATE`: Learning rate (default: 5e-5, scaled by world size)
-- `WORLD_SIZE`: Total number of processes (default: 4 for 1 Master + 3 Workers)
+- `BATCH_SIZE`: Training batch size per GPU (default: 8)
+- `LEARNING_RATE`: Learning rate (default: 5e-5, scaled by world size in PyTorchJob)
+- `WORLD_SIZE`: Total number of processes (set automatically by PyTorchJob)
 - `RANK`: Process rank (set automatically by PyTorchJob)
 - `LOCAL_RANK`: Local GPU rank within node (set automatically)
 - `MASTER_ADDR`: Master node address (set by PyTorchJob)
@@ -119,6 +145,14 @@ The distributed training script accepts configuration through environment variab
 - `NCCL_DEBUG`: NCCL debugging level (default: INFO)
 - `DATA_DIR`: Directory for dataset (default: /shared/data)
 - `OUTPUT_DIR`: Directory for model outputs (default: /shared/models)
+
+**Ray Training (`ray_training.py`):**
+- `NUM_WORKERS`: Number of Ray workers for training (default: 4)
+- `OUTPUT_DIR`: Directory for model outputs (default: /tmp/models)
+- `DATASET_PATH`: Path to parquet dataset (default: data/qa_dataset.parquet)
+- `AIM_REPO`: Aim tracking repository path (default: /aim)
+
+**Note**: Ray Train handles distributed context automatically - no WORLD_SIZE, RANK, MASTER_ADDR needed!
 
 ### Distributed Training Optimizations
 
@@ -201,12 +235,27 @@ messages: [
 - Updated for distributed wilderness survival training focus
 
 **Training Framework:**
-- **Distributed TRL SFTTrainer**: Advanced supervised fine-tuning for chat models with DDP
-- **SFTConfig**: Optimized training arguments for conversational AI in distributed setup
+
+**PyTorchJob Implementation:**
+- **Distributed TRL SFTTrainer**: Advanced supervised fine-tuning for chat models with manual DDP
+- **SFTConfig**: Optimized training arguments with explicit distributed parameters
+- **Manual Setup**: setup_distributed() function configures NCCL backend
+- **Accelerate Integration**: Handles DDP wrapping and gradient synchronization
+- **Rank 0 Saving**: Only master node saves model artifacts
+
+**Ray Train Implementation:**
+- **Ray TorchTrainer**: Wraps TRL SFTTrainer for distributed execution
+- **Automatic Setup**: Ray Train handles all distributed configuration
+- **train_func**: Training logic wrapped in function for distribution
+- **Ray Dashboard**: Real-time monitoring and debugging
+
+**Common to Both:**
+- **TRL SFTTrainer**: Advanced supervised fine-tuning for chat models
+- **SFTConfig**: Optimized training arguments for conversational AI
 - **Chat Template**: Proper ChatML format handling across all nodes
 - **System Prompt Integration**: Consistent training and inference prompts
 - **BF16 Precision**: Optimal for L40S Ada Lovelace architecture
-- **Gradient Synchronization**: Automatic via PyTorch DDP
+- **Gradient Synchronization**: Automatic (PyTorch DDP or Ray Train)
 
 **Training Metrics:**
 - Training/validation loss curves (from rank 0)
@@ -250,3 +299,10 @@ messages: [
 - **Memory Utilization**: Optimal distribution across 192GB total VRAM
 - **Communication Overhead**: Minimized through NCCL optimization
 - **Convergence**: Improved due to larger effective batch size and learning rate scaling
+
+
+
+
+
+
+

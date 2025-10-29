@@ -1,16 +1,35 @@
 # llm-fine-tune-distributed
 
-Wilderness Survival & Practical Skills Q&A Distributed Fine-tuning with OpenShift AI and Kubeflow
+Wilderness Survival & Practical Skills Q&A Distributed Fine-tuning with OpenShift AI
 
-This project demonstrates **distributed fine-tuning** of HuggingFaceTB/SmolLM3-3B using TRL framework across **multiple GPUs** on practical skills Q&A data with Red Hat OpenShift AI and PyTorchJob orchestration. The model transforms from a generic language model into a comprehensive wilderness survival expert that provides detailed guidance on essential survival and practical skills, with **4x faster training** through distributed computing.
+This project demonstrates **distributed fine-tuning** of HuggingFaceTB/SmolLM3-3B using TRL framework across **multiple GPUs** on practical skills Q&A data with Red Hat OpenShift AI. The model transforms from a generic language model into a comprehensive wilderness survival expert that provides detailed guidance on essential survival and practical skills, with **4x faster training** through distributed computing.
+
+## 🚀 Two Implementation Options
+
+This repository includes **two implementations** for distributed training:
+
+1. **PyTorchJob** (Original) - Using Kubeflow Training Operator with manual PyTorch DDP
+2. **Ray/KubeRay** (NEW!) - Using Ray Train with CodeFlare SDK for simplified deployment
+
+Both achieve the same training results, but Ray offers significant advantages in development workflow, monitoring, and fault tolerance.
 
 ## Distributed Training Architecture
 
+### PyTorchJob Implementation
 - **Master Node**: 1 replica (coordinates training, handles model saving)
 - **Worker Nodes**: 3 replicas (participate in distributed training)
 - **Total GPUs**: 4× NVIDIA L40S (192GB total VRAM)
 - **Communication**: NCCL backend for GPU-to-GPU coordination
-- **Training Speed**: ~4x faster than single-node training
+- **Deployment**: YAML-based with kubectl
+
+### Ray/KubeRay Implementation ⚡ NEW
+- **Head Node**: 1 node (Ray cluster coordinator + training participant)
+- **Worker Nodes**: 3 nodes (Ray workers for distributed training)
+- **Total GPUs**: 4× NVIDIA L40S (192GB total VRAM)
+- **Communication**: Ray Train with automatic distributed setup
+- **Deployment**: Programmatic with CodeFlare SDK (Python)
+- **Monitoring**: Ray Dashboard with rich visualizations
+- **Benefits**: Faster iteration, hyperparameter tuning, better fault tolerance
 
 ## Good Questions for Testing
 
@@ -20,7 +39,13 @@ This project demonstrates **distributed fine-tuning** of HuggingFaceTB/SmolLM3-3
 4. What is the easiest loop knot to tie?
 5. I have a whistle, what is the right way to signal for help?
 
-## Quick Start (Distributed Training)
+## Quick Start
+
+### Option 1: Ray/KubeRay 
+
+1. ** Follow steps as per ray/scripts/ray-distributed-training-complete.ipynb
+
+### Option 2: PyTorchJob 
 
 1. **Deploy Distributed Training Job**:
    ```bash
@@ -176,11 +201,50 @@ Answer: "Check your car's owner's manual or the tire information placard on the 
 - Network configuration for inter-node communication
 - Resource quotas and limits enforcement
 
+## Ray vs PyTorchJob Comparison
+
+| Feature | Ray/KubeRay | PyTorchJob |
+|---------|-------------|------------|
+| **Deployment** | Python SDK (programmatic) | YAML files |
+| **Development Speed** | ⚡ Fast (no Docker builds) | Slower (build + push image) |
+| **Monitoring** | Ray Dashboard (rich UI) | kubectl logs |
+| **Fault Tolerance** | Auto worker recovery | Pod restart only |
+| **Hyperparameter Tuning** | Built-in (Ray Tune) | Manual |
+| **Setup Complexity** | Low (auto distributed setup) | Medium (manual DDP config) |
+| **Iteration Time** | 30-60 seconds | 10-15 minutes |
+
+
 ## Project Details
 
 See [claude.md](claude.md) for complete project documentation, distributed training technical specifications, L40S GPU optimization details for multi-node setups, and OpenShift AI distributed integration information.
 
-## Troubleshooting Distributed Training
+
+## Troubleshooting
+
+### Ray/KubeRay Issues
+
+**Cluster Not Ready**:
+```bash
+# Check RayCluster status
+kubectl get raycluster <cluster-name> -n <cluster-namespace>
+kubectl describe raycluster <cluster-name> -n <cluster-namespace>
+
+# Check Ray pods
+kubectl get pods -l ray.io/cluster=<cluster-name> -n <cluster-namespace>
+
+# View head pod logs
+kubectl logs -l ray.io/node-type=head -n <cluster-namespace>
+```
+
+**Job Failed**:
+Ray Dashboard route available in the Jupyter Notebook ray-distributed-training.ipynb
+
+**Python Package Issues**:
+- Packages are installed via `runtime_env.pip` automatically
+
+---
+
+### PyTorchJob Issues
 
 **Common Issues**:
 1. **Communication Timeouts**: Check NCCL_DEBUG logs and network connectivity
