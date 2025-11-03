@@ -1,12 +1,17 @@
 """
 Ray Train version of distributed LLM fine-tuning for wilderness survival Q&A.
 This script uses Ray Train with TorchTrainer to replace manual PyTorch DDP setup.
+
+Configuration can be provided via:
+1. Command-line arguments (recommended)
+2. Environment variables (fallback)
 """
 
 import torch
 import os
 import json
 import tempfile
+import argparse
 from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
@@ -145,12 +150,23 @@ def train_func(config):
     tokenizer.padding_side = "right"
     print("Tokenizer loaded successfully")
     
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        cache_dir="/tmp/model_cache",
-        attn_implementation="flash_attention_2",
-    )
+    # Try to use flash_attention_2 if available, otherwise use default
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16,
+            cache_dir="/tmp/model_cache",
+            attn_implementation="flash_attention_2",
+        )
+        print("✓ Using Flash Attention 2")
+    except Exception as flash_error:
+        print(f"⚠️  Flash Attention 2 not available: {flash_error}")
+        print("   Using default attention implementation")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16,
+            cache_dir="/tmp/model_cache",
+        )
     
     print(f"Model loaded successfully")
     
@@ -202,7 +218,22 @@ def train_func(config):
     # Load and Prepare Dataset
     print(f"Loading Q&A dataset from: {dataset_path}")
     
-    dataset = load_dataset("parquet", data_files=dataset_path)
+    # Support multiple data sources
+    if dataset_path.startswith("s3://"):
+        # Load from S3
+        print(f"  Loading from S3...")
+        import s3fs
+        fs = s3fs.S3FileSystem()
+        dataset = load_dataset("parquet", data_files=dataset_path, storage_options={"client": fs})
+    elif dataset_path.startswith("http://") or dataset_path.startswith("https://"):
+        # Load from URL
+        print(f"  Loading from URL...")
+        dataset = load_dataset("parquet", data_files=dataset_path)
+    else:
+        # Load from local file
+        print(f"  Loading from local file...")
+        dataset = load_dataset("parquet", data_files=dataset_path)
+    
     full_dataset = dataset["train"]
     
     print(f"Total dataset size: {len(full_dataset):,} Q&A pairs")
@@ -340,31 +371,82 @@ def train_func(config):
     return training_result
 
 
+def parse_args():
+    """Parse command-line arguments with environment variable fallbacks"""
+    parser = argparse.ArgumentParser(description="Ray Train distributed LLM fine-tuning")
+    
+    # Training parameters
+    parser.add_argument("--epochs", type=int, 
+                       default=int(os.getenv("EPOCHS", "4")),
+                       help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, 
+                       default=int(os.getenv("BATCH_SIZE", "8")),
+                       help="Batch size per GPU")
+    parser.add_argument("--learning-rate", type=float, 
+                       default=float(os.getenv("LEARNING_RATE", "5e-5")),
+                       help="Learning rate")
+    parser.add_argument("--output-dir", type=str, 
+                       default=os.getenv("OUTPUT_DIR", "/tmp/models"),
+                       help="Output directory for model")
+    parser.add_argument("--dataset-path", type=str,
+                       default=os.getenv("DATASET_PATH", "data/qa_dataset.parquet"),
+                       help="Path to dataset")
+    parser.add_argument("--data-dir", type=str,
+                       default=os.getenv("DATA_DIR", "/tmp/data"),
+                       help="Data directory")
+    parser.add_argument("--aim-repo", type=str,
+                       default=os.getenv("AIM_REPO", "/aim"),
+                       help="Aim experiment tracking repo")
+    parser.add_argument("--model-name", type=str,
+                       default="HuggingFaceTB/SmolLM3-3B",
+                       help="Model name from HuggingFace")
+    
+    return parser.parse_args()
+
+
 def main():
     """
     Main entry point for Ray Train distributed training.
     Sets up TorchTrainer and launches distributed training.
     
-    Configuration is read from environment variables (same as original training.py).
+    Configuration from command-line arguments (preferred) or environment variables (fallback).
     """
-    # Configuration from environment variables (EXACTLY like original training.py)
-    model_name = "HuggingFaceTB/SmolLM3-3B"
-    dataset_path = os.getenv("DATASET_PATH", "data/qa_dataset.parquet")
-    epochs = int(os.getenv("EPOCHS", "4"))
-    batch_size = int(os.getenv("BATCH_SIZE", "8"))
-    learning_rate = float(os.getenv("LEARNING_RATE", "5e-5"))
-    data_dir = os.getenv("DATA_DIR", "/tmp/data")
-    output_dir = os.getenv("OUTPUT_DIR", "/tmp/models")
-    aim_repo = os.getenv("AIM_REPO", "/aim")
+    # Parse arguments (supports both CLI args and env vars)
+    args = parse_args()
+    
+    # Set environment variables from parsed args
+    # This allows train_func to read them via os.getenv() without changes
+    os.environ["EPOCHS"] = str(args.epochs)
+    os.environ["BATCH_SIZE"] = str(args.batch_size)
+    os.environ["LEARNING_RATE"] = str(args.learning_rate)
+    os.environ["OUTPUT_DIR"] = args.output_dir
+    os.environ["DATASET_PATH"] = args.dataset_path
+    os.environ["DATA_DIR"] = args.data_dir
+    os.environ["AIM_REPO"] = args.aim_repo
+    
+    # Configuration from arguments
+    model_name = args.model_name
+    dataset_path = args.dataset_path
+    epochs = args.epochs
+    batch_size = args.batch_size
+    learning_rate = args.learning_rate  # Already a float, no conversion issues!
+    data_dir = args.data_dir
+    output_dir = args.output_dir
+    aim_repo = args.aim_repo
     
     # Scaling configuration for distributed training
     num_workers = int(os.getenv("NUM_WORKERS", "4"))
     
+    # Get CPU allocation from environment or default to match cluster config
+    cpus_per_worker = int(os.getenv("CPUS_PER_WORKER", "2"))  # Match cluster worker_cpus
+    
     scaling_config = ScalingConfig(
         num_workers=num_workers,
         use_gpu=True,
-        resources_per_worker={"CPU": 6, "GPU": 1},
+        resources_per_worker={"CPU": cpus_per_worker, "GPU": 1},
     )
+    
+    print(f"  Resources per worker: {cpus_per_worker} CPU, 1 GPU")
     
     # Run configuration with checkpointing
     run_config = RunConfig(
@@ -380,7 +462,7 @@ def main():
     print("=" * 80)
     print("Ray Train Distributed LLM Fine-tuning")
     print("=" * 80)
-    print(f"Configuration from environment variables:")
+    print(f"Configuration:")
     print(f"  Model: {model_name}")
     print(f"  Dataset: {dataset_path}")
     print(f"  Epochs: {epochs}")
@@ -389,6 +471,8 @@ def main():
     print(f"  Data dir: {data_dir}")
     print(f"  Output dir: {output_dir}")
     print(f"  Num workers: {num_workers}")
+    print("")
+    print("  (from command-line args or environment variables)")
     print("=" * 80)
     
     # Empty config dict (train_func reads from env vars directly)
@@ -429,15 +513,7 @@ def main():
 
 
 if __name__ == "__main__":
-    # Check if running inside Ray Train worker
-    # If so, this is called by TorchTrainer, run train_func directly
-    # If not, set up TorchTrainer and launch distributed training
-    try:
-        # Try to get Ray Train context - if this works, we're inside a worker
-        context = train.get_context()
-        print("Running inside Ray Train worker - this shouldn't happen when called directly")
-        print("Use 'ray job submit' or CodeFlare SDK to launch this script")
-    except RuntimeError:
-        # Not inside Ray Train worker - run main setup
-        main()
+    # When executed by Ray, just run main() which sets up TorchTrainer
+    # TorchTrainer will then call train_func on each worker
+    main()
 
